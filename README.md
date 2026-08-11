@@ -1,592 +1,508 @@
 # LangGraph-challenge
 
-## 1. LangGraph in one sentence
 
-**LangGraph is a framework for constructing stateful, controllable agent workflows as graphs, where nodes perform computation and edges determine how execution proceeds.**
+Claro. Si ya conocías LangGraph, conviene refrescarlo desde la perspectiva actual y no simplemente repasar la API antigua: el ecosistema LangChain/LangGraph ha cambiado bastante y muchos tutoriales anteriores a LangGraph/LangChain v1 ya no representan la forma recomendada de construir agentes.
 
-The conceptual shift is important:
+## 1. El modelo mental correcto
 
-> Instead of asking, “What sequence of prompts should my application execute?”, ask, **“What states can my agent occupy, what transitions are permissible, and who or what determines those transitions?”**
+**LangGraph es un framework de orquestación para sistemas agénticos con estado.**
 
-That makes LangGraph particularly suitable for systems that are **iterative, branching, persistent, interruptible, or partially autonomous**.
+La idea central no es realmente «hacer un agente», sino modelar una ejecución como un **grafo dirigido que evoluciona sobre un estado compartido**:
 
----
+[
+State_t \xrightarrow{Node} State_{t+1}
+]
 
-## 2. The core mental model
+Sus piezas fundamentales son:
 
-Think of a LangGraph application as:
+* **State** → información compartida durante la ejecución.
+* **Node** → función que lee y/o modifica ese estado.
+* **Edge** → determina qué nodo se ejecuta después.
+* **Conditional edge** → routing dinámico.
+* **Checkpointer** → persiste el estado de ejecución.
+* **Thread** → identifica una ejecución/conversación persistente.
+* **Interrupt** → suspende la ejecución y permite intervención externa/humana.
 
-**State + Nodes + Edges + Control Flow + Persistence**
-
-### State
-
-The **state** is the shared information that evolves throughout execution.
-
-Conceptually:
-
-```python
-class AgentState(TypedDict):
-    messages: list
-    user_query: str
-    retrieved_docs: list
-    confidence: float
-    attempts: int
-```
-
-Each node reads some portion of this state and returns an **update** to it.
-
-This is one of LangGraph's most consequential design decisions. Rather than allowing agents to communicate through an amorphous conversational context, you can make the information flowing through the system **explicit and inspectable**.
+Esto es importante porque LangGraph no debería entenderse simplemente como «LangChain para agentes». Su valor aparece cuando necesitas controlar **qué ocurre, cuándo ocurre y qué pasa cuando algo falla o requiere intervención**.
 
 ---
 
-### Nodes
+## 2. Del workflow al agente
 
-A node is simply a computational step.
-
-It might:
-
-* call an LLM;
-* invoke a tool;
-* retrieve documents;
-* validate an answer;
-* classify an intent;
-* modify state;
-* execute deterministic business logic.
-
-For example:
+Imagina un sistema de investigación:
 
 ```text
-retrieve_documents
-        ↓
-generate_answer
-        ↓
-evaluate_answer
+START
+  │
+  ▼
+Planner
+  │
+  ▼
+Researcher
+  │
+  ▼
+Evaluator
+  │
+  ├── calidad insuficiente ──► Researcher
+  │
+  └── calidad suficiente
+              │
+              ▼
+            Writer
+              │
+              ▼
+             END
 ```
 
-Crucially, **a node does not have to be an AI agent**.
+Cada caja puede contener un LLM, herramientas, código convencional o incluso otro grafo.
 
-That distinction is often overlooked.
-
-A robust agentic system should generally contain substantial amounts of deterministic software around comparatively small pockets of probabilistic reasoning.
-
----
-
-### Edges
-
-Edges determine **where execution goes next**.
-
-A normal edge is deterministic:
+El detalle importante es el bucle:
 
 ```text
-retrieve → generate
+Researcher → Evaluator → Researcher
 ```
 
-A conditional edge introduces branching:
-
-```text
-                ┌→ finish
-evaluate ───────┤
-                └→ retrieve_again
-```
-
-The routing decision might depend on state:
-
-```python
-def route(state):
-    if state["confidence"] > 0.85:
-        return "finish"
-    return "retrieve_again"
-```
-
-This is where LangGraph becomes substantially more interesting than an ordinary sequential chain.
-
----
-
-## 3. Why graphs matter for agents
-
-Suppose you create a research agent.
-
-A naïve implementation might be:
-
-```text
-Question
-   ↓
-Search
-   ↓
-LLM
-   ↓
-Answer
-```
-
-That is not particularly agentic. It is essentially a pipeline.
-
-A more sophisticated workflow might be:
-
-```text
-                     ┌───────────────┐
-                     │    Planner    │
-                     └───────┬───────┘
-                             ↓
-                     ┌───────────────┐
-                     │    Search     │
-                     └───────┬───────┘
-                             ↓
-                     ┌───────────────┐
-                     │   Synthesis   │
-                     └───────┬───────┘
-                             ↓
-                     ┌───────────────┐
-                     │   Evaluator   │
-                     └───────┬───────┘
-                             │
-                ┌────────────┴────────────┐
-                ↓                         ↓
-          insufficient                 sufficient
-                │                         │
-                └────→ Search             ↓
-                                      Final Answer
-```
-
-Now the system can:
-
-1. formulate a plan;
-2. gather evidence;
-3. synthesise it;
-4. assess its own output;
-5. determine whether further research is warranted;
-6. loop if necessary;
-7. terminate when an explicit criterion is satisfied.
-
-The **cycle** is particularly important.
-
-Traditional DAG-oriented workflow abstractions work well for:
+Un pipeline convencional suele ser:
 
 ```text
 A → B → C → D
 ```
 
-Agents frequently require:
+LangGraph empieza a aportar mucho más cuando tienes:
 
 ```text
 A → B → C
-    ↑   ↓
+    ▲   │
     └───┘
 ```
 
-because reasoning often involves **iteration rather than mere progression**.
+porque el sistema puede **decidir dinámicamente cómo continuar**.
 
 ---
 
-# 4. State is arguably more important than the graph
+## 3. State: probablemente el concepto más importante
 
-A common mistake is to become preoccupied with nodes and edges.
+Por ejemplo:
 
-In production systems, **state design is frequently the harder architectural problem**.
-
-Imagine a customer-support agent whose state contains:
-
-```text
-messages
-customer_profile
-intent
-retrieved_documents
-tool_results
-current_plan
-completed_steps
-confidence
-escalation_required
+```python
+class AgentState(TypedDict):
+    messages: list
+    objective: str
+    research: list[str]
+    iteration: int
+    final_answer: str
 ```
 
-Every component can inspect or update relevant portions of that state.
+Los nodos reciben ese estado:
 
-You should therefore think of LangGraph less as:
+```python
+def researcher(state: AgentState):
+    ...
+    return {
+        "research": new_results,
+        "iteration": state["iteration"] + 1
+    }
+```
 
-> “a visual way of connecting agents”
+LangGraph combina esas actualizaciones con el estado existente.
 
-and more as:
+Aquí aparece otro concepto importante: los **reducers**. Si varios nodos escriben sobre el mismo campo, necesitas definir cómo se combinan esos valores.
 
-> **a state-transition runtime for orchestrating long-running LLM-driven computation.**
+Por ejemplo, en lugar de reemplazar:
 
-That formulation is considerably closer to its architectural significance.
+```text
+messages = new_messages
+```
+
+puedes acumular:
+
+```text
+messages = messages + new_messages
+```
+
+Entender `State + reducers` evita bastantes diseños frágiles.
 
 ---
 
-# 5. Agent ≠ workflow
+## 4. Routing: donde aparece la autonomía
 
-This distinction is indispensable.
-
-Consider three architectures.
-
-### Deterministic workflow
-
-```text
-Input
- ↓
-Retrieve
- ↓
-Generate
- ↓
-Validate
- ↓
-Output
-```
-
-The programmer controls the trajectory.
-
-### Agent
-
-```text
-Input
- ↓
-LLM decides:
- ├── search
- ├── query database
- ├── call API
- ├── calculate
- └── answer
-```
-
-The model has considerably greater discretion over what happens next.
-
-### Hybrid agentic workflow
-
-```text
-                    ┌─ Search Tool
-                    │
-Input → Router → Agent ─ Database Tool
-                    │
-                    └─ API Tool
-                         ↓
-                     Validator
-                         ↓
-              ┌── pass → Output
-              │
-              └── fail → Agent
-```
-
-This third architecture is often preferable in production.
-
-Why?
-
-Because **unbounded autonomy is usually a liability rather than an achievement**.
-
-You want the LLM to exercise discretion where semantic reasoning is valuable while retaining deterministic control over:
-
-* permissions;
-* budgets;
-* retries;
-* validation;
-* compliance;
-* termination;
-* escalation.
-
-LangGraph is particularly well suited to this hybrid philosophy.
-
----
-
-# 6. Tool calling
-
-A LangGraph agent commonly operates something like this:
+Supongamos que un agente puede:
 
 ```text
 User
- ↓
-Agent Node
- ↓
-Does model request a tool?
- ├── No → END
  │
- └── Yes
-       ↓
-    Tool Node
-       ↓
-    Agent Node
-       ↓
-      ...
+ ▼
+LLM
+ │
+ ├── responde directamente ─────────► END
+ │
+ └── solicita tool
+           │
+           ▼
+         Tools
+           │
+           └──────────────► LLM
 ```
 
-Suppose the user asks:
+El modelo puede producir una llamada a una herramienta y el grafo determina que debe ir al nodo `Tools`.
 
-> “What were Apple's latest quarterly revenues, and what percentage increase does that represent?”
-
-The model might decide:
+Después:
 
 ```text
-1. Search financial data
-2. Extract current revenue
-3. Extract previous comparable revenue
-4. Use calculator
-5. Construct answer
+tool result → LLM
 ```
 
-The graph repeatedly alternates between **reasoning and acting** until no further tool call is required.
+y el ciclo continúa hasta que el modelo genera una respuesta final.
 
-This resembles the classic **ReAct** paradigm:
+Este patrón es esencialmente la familia **ReAct**:
 
-**Reason → Act → Observe → Reason → Act → Observe → Answer**
+[
+Reasoning \rightarrow Action \rightarrow Observation \rightarrow Reasoning
+]
 
-although contemporary implementations do not necessarily expose textual chain-of-thought.
+con LangGraph controlando la ejecución.
 
 ---
 
-# 7. Persistence and checkpoints
+## 5. Pero no confundas «agentic» con «LLM decide todo»
 
-This is one of LangGraph's more practically consequential capabilities.
+Este es uno de los errores arquitectónicos más frecuentes.
 
-Imagine a graph with 15 expensive steps.
-
-After step 12:
+Un sistema:
 
 ```text
-API timeout
+LLM → decide cualquier cosa → llama cualquier tool
 ```
 
-Without persistence:
+parece muy agéntico, pero suele ser difícil de:
+
+* depurar;
+* evaluar;
+* controlar;
+* asegurar;
+* reproducir;
+* operar en producción.
+
+Un diseño más robusto suele mezclar:
 
 ```text
-Start again from step 1.
+deterministic workflow
+        +
+LLM decisions
+        +
+tool execution
+        +
+validation
+        +
+persistence
 ```
 
-With checkpointing:
+Es decir:
 
-```text
-Resume from an appropriate persisted state.
-```
+> **Autonomía donde aporta valor; determinismo donde necesitas garantías.**
 
-Persistence also enables **long-lived conversational or operational state**.
-
-Conceptually:
-
-```text
-Thread A
-checkpoint 1
-checkpoint 2
-checkpoint 3
-
-Thread B
-checkpoint 1
-checkpoint 2
-```
-
-The runtime can associate execution with a thread or equivalent identifier and restore relevant state.
-
-This becomes indispensable for agents whose lifespan exceeds a single HTTP request.
+LangGraph encaja especialmente bien con esta filosofía.
 
 ---
 
-# 8. Human-in-the-loop
+## 6. Persistencia y durable execution
 
-Suppose an agent proposes:
+Aquí LangGraph se diferencia bastante de implementar simplemente un loop en Python.
 
-> Transfer £25,000 to supplier X.
+Con un **checkpointer**, el estado del grafo puede persistirse asociado a un `thread_id`.
 
-A sensible architecture should not merely hope that the model behaves responsibly.
-
-Instead:
-
-```text
-Agent
- ↓
-Prepare transaction
- ↓
-INTERRUPT
- ↓
-Human approval
- ├── approve → execute
- └── reject  → cancel
-```
-
-The graph can persist its state while execution is suspended.
-
-Later:
-
-```text
-Human approves
-      ↓
-Graph resumes
-      ↓
-Execute transaction
-```
-
-This pattern matters enormously in enterprise agentic systems.
-
-High-consequence operations should often have **explicit approval boundaries**, rather than relying solely on better prompting.
-
----
-
-# 9. Multi-agent architectures
-
-LangGraph can also orchestrate multiple specialised agents.
-
-For example:
-
-```text
-                 Supervisor
-                /    |     \
-               /     |      \
-              ↓      ↓       ↓
-        Researcher Analyst Writer
-              \      |       /
-               \     |      /
-                  Aggregator
-                      ↓
-                    Output
-```
-
-Each agent might have:
-
-* its own system instructions;
-* its own tools;
-* specialised context;
-* a constrained responsibility.
-
-The supervisor determines which specialist should act.
-
-But there is a trap here.
-
-Developers frequently leap from:
-
-> “One agent isn't performing well.”
-
-to:
-
-> “Let's build seven agents.”
-
-That often exacerbates the problem.
-
-Every additional agent introduces:
-
-* another probabilistic decision-maker;
-* additional prompts;
-* additional state transitions;
-* more latency;
-* greater token expenditure;
-* more difficult debugging;
-* more opportunities for contradictory behaviour.
-
-A multi-agent architecture is warranted when **specialisation or isolation genuinely improves the system**, not because anthropomorphising software into a corporate org chart feels sophisticated.
-
----
-
-# 10. LangGraph's real value proposition
-
-You could implement most of these patterns yourself with ordinary Python.
-
-For example:
+Conceptualmente:
 
 ```python
-while True:
-    result = agent(state)
-
-    if result.tool_call:
-        state = execute_tool(state, result)
-    else:
-        break
+config = {
+    "configurable": {
+        "thread_id": "conversation-123"
+    }
+}
 ```
 
-So why LangGraph?
-
-Because production agents rapidly accumulate requirements such as:
+Entonces tienes algo parecido a:
 
 ```text
-state management
-branching
-cycles
-persistence
-streaming
-interruptions
-retries
-human approval
-tool execution
+Thread 123
+
+checkpoint 1
+     ↓
+checkpoint 2
+     ↓
+checkpoint 3
+     ↓
+checkpoint 4
+```
+
+Esto permite recuperar ejecuciones, mantener conversaciones con estado y construir procesos que no dependen exclusivamente de que un único proceso Python permanezca vivo.
+
+La documentación actual sigue situando la persistencia y ejecución durable entre las capacidades centrales del ecosistema LangGraph/LangChain. ([Docs by LangChain][1])
+
+---
+
+## 7. Human-in-the-loop
+
+Supón que el agente prepara:
+
+> Transferir £20,000 al proveedor X.
+
+No quieres:
+
+```text
+LLM → payment API
+```
+
+Quieres:
+
+```text
+LLM
+ │
+ ▼
+prepare transaction
+ │
+ ▼
+INTERRUPT
+ │
+ ▼
+Human approval
+ │
+ ├── reject → END
+ │
+ └── approve
+       │
+       ▼
+ payment API
+```
+
+El grafo puede suspenderse conservando su estado y continuar después de recibir la decisión.
+
+Esto convierte HITL en una propiedad arquitectónica del workflow en lugar de un `input()` improvisado.
+
+---
+
+## 8. Tools
+
+Una tool no tiene por qué ser sofisticada:
+
+```python
+@tool
+def search_customer(customer_id: str):
+    ...
+```
+
+Puede representar:
+
+```text
+database
+REST API
+search engine
+vector DB
+filesystem
+Python function
+CRM
+ERP
+email
+browser
+another agent
+```
+
+El LLM decide **qué quiere hacer**; tu infraestructura determina **qué está autorizado a hacer realmente**.
+
+Esta distinción es crucial en producción.
+
+---
+
+## 9. Multi-agent
+
+Aquí conviene ser especialmente crítico.
+
+Es tentador diseñar:
+
+```text
+Manager Agent
+   │
+   ├── Research Agent
+   ├── Coding Agent
+   ├── Data Agent
+   ├── Critic Agent
+   ├── Security Agent
+   └── Writer Agent
+```
+
+porque visualmente parece sofisticado.
+
+Pero más agentes ≠ mejor sistema.
+
+Cada agente adicional introduce:
+
+* más llamadas al modelo;
+* más latencia;
+* más coste;
+* más estado;
+* más posibilidades de loops;
+* más dificultad para atribuir errores;
+* más superficie de evaluación.
+
+A menudo:
+
+```text
+1 agent + 8 tools
+```
+
+es mejor arquitectura que:
+
+```text
+8 agents + 8 tools
+```
+
+Usaría multi-agent cuando exista **separación real de contexto, capacidades, permisos o responsabilidad**, no simplemente para representar distintos prompts.
+
+---
+
+## 10. LangGraph vs LangChain hoy
+
+Hay un cambio importante respecto a tutoriales antiguos.
+
+Actualmente, **LangChain ofrece APIs de agentes de más alto nivel construidas sobre LangGraph**, mientras LangGraph queda como la capa de orquestación de menor nivel cuando necesitas controlar explícitamente ejecución, estado y workflows. Por eso no necesitas escribir manualmente un `StateGraph` para cualquier chatbot con herramientas. ([Docs by LangChain][1])
+
+Una regla práctica:
+
+```text
+¿Agente relativamente estándar?
+        │
+        └── LangChain agent abstractions
+
+¿Workflow complejo / custom?
+        │
+        └── LangGraph
+
+¿Control de estado, branching,
+loops, HITL, persistencia?
+        │
+        └── LangGraph
+```
+
+Y cuidado con tutoriales antiguos basados en APIs que posteriormente cambiaron o quedaron obsoletas.
+
+---
+
+## 11. Arquitectura que merece la pena dominar
+
+Si quieres recuperar un nivel profesional en LangGraph, yo estudiaría este sistema:
+
+```text
+                   ┌───────────────┐
+                   │     USER      │
+                   └───────┬───────┘
+                           ▼
+                    ┌─────────────┐
+                    │   ROUTER    │
+                    └──────┬──────┘
+                           │
+               ┌───────────┴───────────┐
+               ▼                       ▼
+          simple query            complex task
+               │                       │
+               ▼                       ▼
+            answer                  PLANNER
+                                       │
+                                       ▼
+                                   EXECUTOR
+                                       │
+                              ┌────────┴────────┐
+                              ▼                 ▼
+                            TOOL             TOOL
+                              │                 │
+                              └────────┬────────┘
+                                       ▼
+                                   EVALUATOR
+                                       │
+                              ┌────────┴────────┐
+                              │                 │
+                            retry              OK
+                              │                 │
+                              └──► EXECUTOR     ▼
+                                             HUMAN
+                                            APPROVAL
+                                               │
+                                               ▼
+                                             FINAL
+```
+
+Con:
+
+```text
+State
+  ├── messages
+  ├── task
+  ├── plan
+  ├── observations
+  ├── tool_results
+  ├── retries
+  ├── validation
+  └── final_answer
+```
+
+y además:
+
+```text
+checkpointing
+structured outputs
+tool calling
+timeouts
+retry policies
 observability
-recovery
-multi-agent coordination
+evaluations
+permission boundaries
 ```
 
-Eventually your innocent `while` loop becomes a home-grown orchestration framework.
-
-LangGraph gives you abstractions for managing that complexity explicitly.
+Eso ya se aproxima mucho más a un **sistema agéntico de producción** que los ejemplos típicos de veinte líneas.
 
 ---
 
-# 11. A useful architectural hierarchy
+## 12. La distinción que quiero que retengas
 
-When designing an agentic system, think in approximately this order:
-
-```text
-Business objective
-        ↓
-Required decisions
-        ↓
-Deterministic vs probabilistic decisions
-        ↓
-State model
-        ↓
-Tools
-        ↓
-Nodes
-        ↓
-Transitions
-        ↓
-Persistence
-        ↓
-Observability/evaluation
-```
-
-A surprisingly common anti-pattern is the reverse:
+Hay tres niveles que suelen mezclarse:
 
 ```text
-“Let's use LangGraph.”
-        ↓
-“Let's create some agents.”
-        ↓
-“What should they actually do?”
+LLM application
+      ↓
+LLM + tools
+      ↓
+Agent
+      ↓
+Agentic system
 ```
 
-That is technology-first architecture and usually produces unnecessary complexity.
+Un **agente** suele tener un loop del tipo:
 
----
+[
+Observe \rightarrow Reason \rightarrow Act \rightarrow Observe
+]
 
-# 12. The most important principle
+Un **sistema agéntico** puede contener múltiples loops, agentes, workflows deterministas, memoria, herramientas, validadores y humanos.
 
-If you retain only one idea from this refresher, retain this:
+Y **LangGraph no es el agente**.
 
-**Agentic does not mean maximally autonomous.**
+LangGraph es principalmente la **infraestructura de orquestación que permite construir y controlar ese sistema**.
 
-A strong production architecture deliberately determines **where the model is allowed to exercise judgement**.
+Esa diferencia conceptual es más importante que memorizar `add_node()` o `add_edge()`.
 
-For example:
+### Ruta rápida para refrescarlo
 
-```text
-User Request
-     ↓
-Deterministic authentication
-     ↓
-LLM intent classification
-     ↓
-Deterministic permission check
-     ↓
-LLM planning
-     ↓
-Controlled tool execution
-     ↓
-Deterministic validation
-     ↓
-LLM response generation
-```
+Yo lo haría mediante un proyecto incremental, no leyendo documentación de principio a fin:
 
-This architecture exploits the model's semantic flexibility without surrendering control of the entire system to probabilistic behaviour.
+1. **StateGraph básico** → state, nodes, edges y conditional edges.
+2. **Agente ReAct** → model + tools + loop.
+3. **Persistencia** → checkpointer + threads.
+4. **Human-in-the-loop** → interrupts y resume.
+5. **Agente robusto** → structured output, retries, validation y límites.
+6. **Sistema avanzado** → planner/executor/evaluator.
+7. **Multi-agent** → sólo después de poder justificar por qué varios agentes son mejores que uno.
 
-That is precisely the territory in which graph-based orchestration becomes compelling.
+El último punto es importante: empezar directamente por multi-agent suele enseñar patrones llamativos antes de enseñar buena arquitectura.
 
----
+Si quieres hacerlo de forma práctica, podemos construir **desde cero un pequeño sistema agéntico en LangGraph**, aumentando su complejidad paso a paso y examinando en cada etapa el `State`, el grafo y las decisiones arquitectónicas.
 
-## Comprehension challenge
-
-Try answering this **without looking back**:
-
-> You are designing an enterprise research agent that can search internal documents, search the web, query databases, and generate executive reports. Some database operations require human approval, research may need several iterations, and executions may last hours.
->
-> **Why would a LangGraph-style architecture be preferable to a simple tool-calling agent loop?**
->
-> Your answer should discuss at least **state, control flow, persistence, human-in-the-loop execution, and bounded autonomy**.
+[1]: https://docs.langchain.com/oss/python/deepagents/models?utm_source=chatgpt.com "Models - Docs by LangChain"
