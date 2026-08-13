@@ -1894,3 +1894,895 @@ Si puedes construir esto **sin copiar ciegamente un tutorial**, habrás dado un 
 
 Y observa algo: **todavía no necesitas LangGraph, CrewAI ni sistemas multiagente**. Primero debes ser capaz de convertir un LLM en un componente fiable de una aplicación. Después, tool calling y agent loops resultarán mucho más fáciles de entender.
 
+
+
+
+
+
+
+
+
+
+-----------------------------------------------
+
+
+
+
+
+
+
+
+
+Perfecto. Vamos a aprender **RAG desde cero**, pero con mentalidad de desarrollador: primero entender qué problema resuelve, después cada pieza del pipeline y finalmente construirlo.
+
+## 1. ¿Qué es RAG?
+
+**RAG = Retrieval-Augmented Generation**, que podríamos traducir como **generación aumentada mediante recuperación de información**.
+
+El problema fundamental es que un LLM no conoce necesariamente tus datos privados o recientes.
+
+Imagina que tu empresa tiene 50.000 documentos internos y preguntas:
+
+> "¿Cuál es nuestra política para aprobar gastos superiores a 10.000 €?"
+
+El LLM tiene tres problemas:
+
+1. Puede no conocer la política.
+2. Puede conocer información desactualizada.
+3. Puede inventarse una respuesta plausible.
+
+Una solución ingenua sería meter los 50.000 documentos en el prompt.
+
+Eso no es práctico.
+
+RAG hace algo mucho más inteligente:
+
+```text
+Pregunta del usuario
+        ↓
+Buscar información relevante
+        ↓
+Encontrar 3-10 fragmentos relevantes
+        ↓
+Entregárselos al LLM
+        ↓
+LLM responde utilizando esa información
+```
+
+Por ejemplo:
+
+```text
+Usuario:
+"¿Quién puede aprobar gastos >10.000€?"
+
+                ↓
+
+         RETRIEVAL SYSTEM
+
+                ↓
+
+Encuentra:
+
+[Documento: Expense Policy]
+"Expenses between €10,000 and €50,000
+require approval from the Finance Director."
+
+                ↓
+
+               LLM
+
+                ↓
+
+"Los gastos entre 10.000€ y 50.000€
+requieren aprobación del Finance Director.
+
+Fuente: Expense Policy."
+```
+
+La idea esencial es:
+
+> **El LLM no tiene que memorizar el conocimiento. Tiene que saber utilizar el conocimiento correcto cuando lo necesita.**
+
+---
+
+# 2. El pipeline completo
+
+Tu esquema era:
+
+```text
+Documents
+    ↓
+Parsing
+    ↓
+Chunking
+    ↓
+Embeddings
+    ↓
+Vector / lexical index
+    ↓
+Retrieval
+    ↓
+Reranking
+    ↓
+Context
+    ↓
+LLM
+```
+
+Vamos pieza por pieza.
+
+---
+
+# 3. Documents
+
+Primero tienes tus fuentes de conocimiento.
+
+Pueden ser:
+
+```text
+PDF
+Word
+HTML
+Wiki
+Notion
+Confluence
+SharePoint
+emails
+manuales
+tickets
+bases de datos
+```
+
+Por ejemplo:
+
+```text
+documents/
+
+├── expense_policy.pdf
+├── remote_work_policy.pdf
+├── security_policy.pdf
+└── travel_policy.pdf
+```
+
+Todavía no podemos hacer demasiado con ellos.
+
+Primero necesitamos **extraer su contenido**.
+
+---
+
+# 4. Parsing
+
+Parsing significa convertir el documento original en información que nuestro sistema pueda procesar.
+
+Por ejemplo:
+
+```text
+expense_policy.pdf
+```
+
+se transforma en:
+
+```text
+Expense Policy
+
+Employees may submit travel expenses...
+
+Expenses below €10,000 require...
+
+Expenses between €10,000 and €50,000 require...
+```
+
+Pero un parser bueno debería conservar más que texto.
+
+Idealmente:
+
+```python
+{
+    "text": "Expenses between €10,000...",
+    "page": 17,
+    "document": "expense_policy.pdf",
+    "section": "Approval limits"
+}
+```
+
+Esto será importantísimo para generar **citas** posteriormente.
+
+---
+
+# 5. Chunking
+
+Aquí aparece uno de los conceptos más importantes de RAG.
+
+Supongamos que un PDF tiene 200 páginas.
+
+No queremos tratar las 200 páginas como una única pieza.
+
+Lo dividimos en fragmentos llamados **chunks**.
+
+Por ejemplo:
+
+```text
+DOCUMENTO
+
+████████████████████████████████████
+
+                ↓
+
+CHUNKS
+
+██████
+██████
+██████
+██████
+██████
+██████
+```
+
+Podríamos terminar con:
+
+```text
+chunk 1 → introducción
+chunk 2 → política general
+chunk 3 → gastos <10k
+chunk 4 → gastos 10k-50k
+chunk 5 → gastos >50k
+...
+```
+
+¿Por qué?
+
+Porque cuando alguien pregunta:
+
+> ¿Quién aprueba gastos de 20.000 €?
+
+queremos recuperar:
+
+```text
+chunk 4
+```
+
+no las 200 páginas.
+
+---
+
+# 6. Embeddings
+
+Ahora llegamos al concepto que suele confundir inicialmente.
+
+Un **embedding** convierte texto en una representación numérica.
+
+Por ejemplo:
+
+```text
+"El perro está durmiendo"
+```
+
+podría convertirse conceptualmente en:
+
+```text
+[0.21, -0.73, 0.18, 0.91, ...]
+```
+
+Ese vector puede tener cientos o miles de dimensiones.
+
+Otro texto:
+
+```text
+"Mi cachorro está dormido"
+```
+
+produce otro vector:
+
+```text
+[0.19, -0.70, 0.22, 0.88, ...]
+```
+
+Los números concretos no te interesan demasiado.
+
+Lo importante es que textos con significado parecido tienden a ocupar regiones cercanas en ese espacio vectorial.
+
+Conceptualmente:
+
+```text
+                  animales
+
+       "perro dormido"
+             ●
+           ● "cachorro duerme"
+
+
+                           "gato descansando"
+                                ●
+
+
+
+       "política financiera"
+                  ●
+```
+
+Así podemos buscar por **significado**, no solamente por palabras exactas.
+
+---
+
+# 7. Semantic Search
+
+Supongamos que el documento dice:
+
+> "Employees must obtain authorization from their manager."
+
+Pero el usuario pregunta:
+
+> "¿Necesito permiso de mi jefe?"
+
+Las palabras no coinciden exactamente:
+
+```text
+authorization ≠ permiso
+manager       ≠ jefe
+```
+
+Pero semánticamente significan cosas parecidas.
+
+Los embeddings permiten encontrar esa relación.
+
+El proceso es:
+
+```text
+Pregunta
+   ↓
+embedding model
+   ↓
+vector de la pregunta
+   ↓
+comparar contra vectores almacenados
+   ↓
+encontrar vectores similares
+```
+
+Eso es **semantic search**.
+
+---
+
+# 8. Cosine Similarity
+
+Necesitamos alguna manera matemática de preguntar:
+
+> ¿Qué tan parecidos son estos dos vectores?
+
+Una métrica muy utilizada es **cosine similarity**.
+
+No necesitas dominar inicialmente toda la matemática.
+
+Piensa en dos flechas:
+
+```text
+A ─────────►
+
+B ────────►
+```
+
+Apuntan prácticamente en la misma dirección.
+
+→ alta similitud.
+
+Pero:
+
+```text
+A ─────────►
+
+B
+↑
+│
+│
+```
+
+apuntan en direcciones diferentes.
+
+→ baja similitud.
+
+Conceptualmente podríamos obtener:
+
+```text
+"perro durmiendo"
+"cachorro dormido"
+
+similarity = 0.94
+```
+
+frente a:
+
+```text
+"perro durmiendo"
+"política fiscal"
+
+similarity = 0.12
+```
+
+No confundas esto con una probabilidad. `0.94` **no significa "94% de probabilidades de que sean iguales"**.
+
+---
+
+# 9. Vector Database
+
+Tenemos ahora miles o millones de embeddings.
+
+Necesitamos almacenarlos y buscarlos eficientemente.
+
+Ahí aparecen:
+
+* PostgreSQL + pgvector
+* Qdrant
+* Pinecone
+* Elasticsearch/OpenSearch
+
+Para empezar, sigo recomendándote:
+
+**PostgreSQL + pgvector.**
+
+Podrías almacenar conceptualmente:
+
+| id | text              | embedding     |
+| -- | ----------------- | ------------- |
+| 1  | Expense policy... | `[0.21,...]`  |
+| 2  | Remote work...    | `[0.74,...]`  |
+| 3  | Security...       | `[-0.18,...]` |
+
+Cuando llega una pregunta, calculamos su embedding y buscamos los vectores más cercanos.
+
+---
+
+# 10. Pero semantic search no es suficiente
+
+Aquí aparece una debilidad que muchos tutoriales esconden.
+
+Imagina que buscas:
+
+> `INC-938172`
+
+Eso es un identificador exacto.
+
+Semantic search puede ser peor que una búsqueda tradicional.
+
+Para nombres, códigos, números y términos exactos, queremos también **keyword search**.
+
+Una tecnología clásica para esto es:
+
+**BM25**.
+
+Simplificando:
+
+```text
+Semantic search
+→ encuentra significado parecido
+
+BM25
+→ encuentra coincidencia textual relevante
+```
+
+---
+
+# 11. Hybrid Search
+
+Entonces podemos combinar ambas.
+
+```text
+                Query
+                  │
+          ┌───────┴───────┐
+          ▼               ▼
+   Semantic Search     BM25 Search
+          │               │
+          └───────┬───────┘
+                  ▼
+             combinar
+                  ↓
+              resultados
+```
+
+Esto se denomina **hybrid search**.
+
+Y suele ser bastante más robusto que asumir:
+
+> "Embeddings solucionan todas las búsquedas."
+
+No lo hacen.
+
+---
+
+# 12. Metadata filtering
+
+Supongamos que tenemos documentos de:
+
+```text
+Finance
+HR
+Engineering
+Sales
+Legal
+```
+
+Y el usuario pregunta sobre una política de **Finance**.
+
+Podemos filtrar antes:
+
+```python
+department = "finance"
+```
+
+O:
+
+```python
+country = "UK"
+year >= 2025
+document_type = "policy"
+```
+
+Así evitamos buscar entre información irrelevante.
+
+Un chunk podría tener:
+
+```json
+{
+  "text": "...",
+  "department": "finance",
+  "country": "UK",
+  "year": 2026,
+  "document": "expense_policy.pdf",
+  "page": 17
+}
+```
+
+Los metadatos son extremadamente importantes en sistemas empresariales.
+
+---
+
+# 13. Retrieval
+
+Ahora podemos entender qué significa realmente **retrieval**.
+
+El usuario pregunta:
+
+```text
+"¿Quién aprueba un gasto de 20.000€?"
+```
+
+El sistema recupera quizá:
+
+```text
+Resultado 1 — score 0.91
+Expense Policy — page 17
+
+Resultado 2 — score 0.82
+Finance Handbook — page 42
+
+Resultado 3 — score 0.74
+Travel Policy — page 8
+
+...
+```
+
+Podríamos recuperar los **top 20** resultados.
+
+Pero todavía tenemos un problema.
+
+Que un sistema de búsqueda considere algo relevante no significa que sea realmente el mejor contexto para el LLM.
+
+Ahí aparece el siguiente paso.
+
+---
+
+# 14. Reranking
+
+El primer retrieval busca rápidamente candidatos.
+
+Por ejemplo:
+
+```text
+10.000 chunks
+      ↓
+retrieval
+      ↓
+top 20
+```
+
+Después utilizamos un sistema más preciso para reordenar esos 20:
+
+```text
+20 candidates
+      ↓
+reranker
+      ↓
+1. Expense Policy p17
+2. Finance Handbook p42
+3. Expense Policy p18
+...
+```
+
+Y quizá solamente enviamos los mejores 5 al LLM.
+
+```text
+10.000 documentos/chunks
+        ↓
+retrieval rápido
+        ↓
+20 candidatos
+        ↓
+reranking preciso
+        ↓
+5 mejores
+        ↓
+LLM
+```
+
+Esta arquitectura es muy común porque equilibra **velocidad y precisión**.
+
+---
+
+# 15. Context
+
+Ahora construimos el contexto que recibirá el LLM.
+
+Por ejemplo:
+
+```text
+SYSTEM:
+
+Answer using only the supplied sources.
+If the information isn't available, say so.
+
+CONTEXT:
+
+[Source 1]
+Expense Policy, page 17:
+Expenses between €10,000 and €50,000
+require Finance Director approval.
+
+[Source 2]
+Finance Handbook, page 42:
+...
+
+USER:
+
+Who must approve a €20,000 expense?
+```
+
+El LLM ahora tiene la información necesaria.
+
+Y responde:
+
+```text
+Un gasto de 20.000 € debe ser aprobado
+por el Finance Director.
+
+Fuente: Expense Policy, página 17.
+```
+
+Eso es RAG.
+
+---
+
+# 16. Query rewriting
+
+Hay otro problema.
+
+Los usuarios escribimos preguntas terribles.
+
+Por ejemplo:
+
+> "¿y para los de más de 50k?"
+
+Para una persona que conoce la conversación, está claro.
+
+Para un buscador aislado, no.
+
+Podemos transformar:
+
+```text
+"¿y para los de más de 50k?"
+```
+
+en:
+
+```text
+"approval requirements for expenses
+greater than €50,000"
+```
+
+Eso es **query rewriting**.
+
+El LLM puede convertir la pregunta original en una consulta optimizada para retrieval.
+
+---
+
+# 17. Retrieval evaluation
+
+Ahora llegamos a una parte que no deberías saltarte.
+
+Supongamos que haces un cambio y dices:
+
+> "Creo que ahora mi RAG funciona mejor."
+
+¿En qué te basas?
+
+Necesitamos tests.
+
+Creamos preguntas donde conocemos la respuesta/documento relevante:
+
+```text
+Question:
+Who approves €20k expenses?
+
+Expected document:
+expense_policy.pdf
+
+Expected section:
+Approval Limits
+```
+
+Después ejecutamos 100 preguntas.
+
+Podemos medir cosas como:
+
+```text
+¿apareció el documento correcto en top 1?
+
+¿apareció en top 5?
+
+¿apareció en top 10?
+```
+
+Esto permite comparar:
+
+```text
+RAG v1
+72% correct retrieval
+
+RAG v2
+84%
+
+RAG v3
+91%
+```
+
+Ahora estás haciendo ingeniería, no ajustando parámetros por intuición.
+
+---
+
+# 18. La arquitectura completa
+
+Juntándolo todo:
+
+```text
+                DOCUMENTOS
+                    │
+                    ▼
+                 Parsing
+                    │
+                    ▼
+                 Chunking
+                    │
+                    ▼
+                Embeddings
+                    │
+                    ▼
+          PostgreSQL + pgvector
+                    │
+                    │
+────────────────────────────────────────
+
+                  USER
+                    │
+                    ▼
+            "Pregunta..."
+                    │
+                    ▼
+             Query rewriting
+                    │
+                    ▼
+              ┌─────┴─────┐
+              ▼           ▼
+           Vector        BM25
+           Search        Search
+              │           │
+              └─────┬─────┘
+                    ▼
+              Hybrid Search
+                    │
+                    ▼
+               Top candidates
+                    │
+                    ▼
+                 Reranker
+                    │
+                    ▼
+               Best chunks
+                    │
+                    ▼
+                 Context
+                    │
+                    ▼
+                   LLM
+                    │
+                    ▼
+          Answer + citations
+```
+
+Éste es el modelo mental que quiero que retengas.
+
+---
+
+## Tu primera versión debería ser mucho más sencilla
+
+No cometas el error de intentar construir todo eso inmediatamente.
+
+**RAG v1:**
+
+```text
+PDF
+ ↓
+parse
+ ↓
+chunk
+ ↓
+embeddings
+ ↓
+PostgreSQL + pgvector
+ ↓
+semantic search
+ ↓
+top 5 chunks
+ ↓
+LLM
+ ↓
+answer
+```
+
+Cuando eso funcione y puedas **medir sus fallos**, añade:
+
+```text
+V2 → metadata filtering
+V3 → BM25
+V4 → hybrid search
+V5 → reranking
+V6 → query rewriting
+V7 → evaluation avanzada
+```
+
+Ese orden importa. Si introduces diez componentes desde el principio y el sistema devuelve malas respuestas, no sabrás **qué componente está fallando**.
+
+### El ejercicio que deberías poder resolver
+
+Antes de pasar a agentes, deberías ser capaz de construir esto:
+
+```text
+50-100 PDFs
+     ↓
+PostgreSQL + pgvector
+     ↓
+
+Usuario:
+"¿Cuál es nuestra política X?"
+
+     ↓
+
+tu aplicación recupera
+los fragmentos correctos
+
+     ↓
+
+LLM responde
+
+     ↓
+
+respuesta + documento + página
+```
+
+Y, sobre todo, deberías poder diagnosticar independientemente dos preguntas:
+
+**¿He recuperado la información correcta?** → problema de retrieval.
+
+**¿El LLM recibió la información correcta pero respondió mal?** → problema de generation.
+
+Esa separación entre **retrieval** y **generation** es una de las ideas más importantes que debes dominar antes de construir tu *Knowledge Agent*.
+
+
