@@ -1124,3 +1124,773 @@ Customer Support API
 ```
 
 Cada concepto aparecerá porque **lo necesitas para resolver un problema**, no porque toque estudiarlo en un temario. Ese enfoque te prepara mucho mejor para IA agéntica.
+
+
+
+-----------------------------------------------------------------------------------------------
+
+Sí. La **Fase 3 — LLM Engineering** es donde pasas de “sé usar ChatGPT” a **“sé integrar un LLM dentro de software fiable”**.
+
+La idea central es esta:
+
+```text
+Aplicación Python
+      │
+      ▼
+   API del LLM
+      │
+      ▼
+     Modelo
+      │
+      ▼
+Respuesta estructurada
+      │
+      ▼
+Tu aplicación decide qué hacer
+```
+
+Voy concepto por concepto.
+
+### 1. Trabajar con APIs de modelos
+
+Cuando usas ChatGPT, la interfaz se ocupa de casi todo. Como desarrollador, tu programa habla directamente con un modelo mediante una API.
+
+Conceptualmente:
+
+```python
+response = model(
+    instructions="Eres un analista financiero.",
+    input="Analiza esta factura.",
+)
+```
+
+El modelo devuelve una respuesta y tu programa continúa procesándola.
+
+Por ejemplo:
+
+```text
+Usuario
+   ↓
+FastAPI
+   ↓
+LLM API
+   ↓
+Respuesta
+   ↓
+Python
+   ↓
+Database
+```
+
+Eso permite construir aplicaciones con IA, no simplemente conversaciones.
+
+---
+
+## 2. Prompting
+
+Un prompt es la información/instrucción que proporcionas al modelo.
+
+Malo:
+
+```text
+Analiza esto.
+```
+
+Mejor:
+
+```text
+Analiza la siguiente factura.
+
+Identifica:
+- proveedor
+- fecha
+- importe
+- moneda
+
+No inventes información ausente.
+```
+
+Pero hay un punto importante: **prompt engineering no consiste en encontrar palabras mágicas**.
+
+En producción importa mucho más:
+
+```text
+instrucciones claras
++
+contexto correcto
++
+datos correctos
++
+tools correctas
++
+output estructurado
++
+evaluaciones
+```
+
+que escribir prompts gigantescos.
+
+---
+
+# 3. System instructions
+
+Permiten definir las reglas generales del comportamiento del modelo.
+
+Por ejemplo:
+
+```text
+SYSTEM:
+
+You are an invoice extraction system.
+
+Extract only information explicitly present
+in the provided document.
+
+Never infer missing financial information.
+```
+
+Después llega el input:
+
+```text
+USER:
+
+Invoice #1827
+Microsoft Ltd
+Date: 12/08/2026
+Total: £4,250
+```
+
+La separación conceptual es:
+
+```text
+SYSTEM
+¿Qué eres?
+¿Qué reglas tienes?
+¿Cómo debes comportarte?
+
+USER
+¿Qué quiere el usuario?
+¿Qué datos proporciona?
+```
+
+En un agente esto se vuelve todavía más importante porque puedes establecer reglas como:
+
+```text
+Nunca ejecutes operaciones financieras
+sin aprobación humana.
+```
+
+Aunque ojo: una instrucción del sistema **no sustituye controles de seguridad implementados en código**.
+
+---
+
+# 4. Structured Outputs
+
+Este concepto es extremadamente importante.
+
+Imagina que quieres extraer una factura.
+
+Podrías decirle al LLM:
+
+```text
+Dime proveedor, precio y moneda.
+```
+
+Y obtener:
+
+```text
+Parece que el proveedor es Microsoft y
+la factura tiene un valor de £4,250.
+```
+
+Esto está bien para una persona.
+
+Es malo para software.
+
+Tu aplicación necesita algo predecible:
+
+```json
+{
+    "supplier": "Microsoft",
+    "amount": 4250,
+    "currency": "GBP"
+}
+```
+
+Ahora Python puede hacer:
+
+```python
+invoice.amount
+invoice.currency
+invoice.supplier
+```
+
+Y puedes guardar esos datos en PostgreSQL.
+
+Aquí está el cambio mental importante:
+
+```text
+Chatbot
+LLM → texto → humano
+
+Aplicación IA
+LLM → datos estructurados → software
+```
+
+---
+
+# 5. JSON Schema
+
+Entonces aparece otra pregunta.
+
+¿Cómo especificamos **exactamente** qué estructura queremos?
+
+Con un schema.
+
+Por ejemplo:
+
+```json
+{
+    "supplier": "string",
+    "amount": "number",
+    "currency": "string"
+}
+```
+
+Conceptualmente estás diciéndole al sistema:
+
+> La respuesta tiene que cumplir este contrato.
+
+En Python normalmente utilizarás herramientas como **Pydantic** para representar ese contrato:
+
+```python
+from pydantic import BaseModel
+
+class Invoice(BaseModel):
+    supplier: str
+    amount: float
+    currency: str
+```
+
+Entonces quieres conseguir:
+
+```text
+PDF
+ ↓
+LLM
+ ↓
+Invoice
+ ↓
+Pydantic validation
+ ↓
+Database
+```
+
+Aquí puedes ver por qué antes te recomendaba aprender **Pydantic**.
+
+---
+
+# 6. Streaming
+
+Probablemente hayas observado que ChatGPT no espera 20 segundos y muestra toda la respuesta de golpe.
+
+Va apareciendo progresivamente.
+
+Eso es **streaming**.
+
+Sin streaming:
+
+```text
+request
+   ↓
+
+[esperas 10 segundos]
+
+   ↓
+respuesta completa
+```
+
+Con streaming:
+
+```text
+request
+   ↓
+"The"
+   ↓
+"customer"
+   ↓
+"has"
+   ↓
+"three"
+...
+```
+
+Esto mejora muchísimo la experiencia del usuario.
+
+En Python encontrarás patrones similares a:
+
+```python
+for event in stream:
+    print(event)
+```
+
+o con async:
+
+```python
+async for event in stream:
+    ...
+```
+
+Otra razón por la que `async/await` termina siendo importante.
+
+---
+
+# 7. Retries
+
+Las APIs fallan.
+
+Por ejemplo:
+
+```text
+Tu aplicación
+     ↓
+LLM API
+     ↓
+503 Service Unavailable
+```
+
+Una aplicación amateur simplemente falla.
+
+Una aplicación robusta puede hacer:
+
+```text
+request
+ ↓
+ERROR
+ ↓
+esperar 1 segundo
+ ↓
+retry
+ ↓
+ERROR
+ ↓
+esperar 2 segundos
+ ↓
+retry
+```
+
+Esto suele llamarse **exponential backoff**.
+
+Pero tampoco debes hacer:
+
+```python
+while True:
+    retry()
+```
+
+porque puedes crear loops infinitos, costes innecesarios y saturar servicios.
+
+---
+
+# 8. Rate limits
+
+Los proveedores limitan cuánto puedes utilizar sus APIs en determinado periodo.
+
+Conceptualmente:
+
+```text
+100 requests/minute
+1,000,000 tokens/minute
+```
+
+Imagina que tienes 10.000 usuarios simultáneos.
+
+Todos llaman:
+
+```text
+LLM
+LLM
+LLM
+LLM
+LLM
+...
+```
+
+El proveedor puede responder:
+
+```text
+429 Too Many Requests
+```
+
+Necesitas saber gestionar:
+
+```text
+queues
+rate limiting
+backoff
+concurrency
+batching
+```
+
+Esto se vuelve muy importante al pasar de:
+
+```text
+"funciona en mi portátil"
+```
+
+a:
+
+```text
+"lo utilizan 50.000 personas"
+```
+
+---
+
+# 9. Token / cost management
+
+Los LLM no procesan conceptualmente “páginas”; procesan **tokens**.
+
+Simplificando:
+
+```text
+texto
+ ↓
+tokenizer
+ ↓
+tokens
+ ↓
+LLM
+```
+
+Por ejemplo una frase puede convertirse conceptualmente en:
+
+```text
+"Artificial intelligence is powerful"
+
+Artificial
+intelligence
+is
+powerful
+```
+
+La tokenización real es más compleja, pero la idea basta inicialmente.
+
+¿Por qué importa?
+
+Porque normalmente:
+
+```text
+más tokens
+   ↓
+más coste
++
+más latencia
++
+más contexto utilizado
+```
+
+Imagina que envías 300 páginas al modelo para responder:
+
+> ¿Cuál es el número de factura?
+
+Eso es un mal diseño.
+
+Tal vez necesitas recuperar solamente el fragmento relevante:
+
+```text
+300 páginas
+     ↓
+retrieval
+     ↓
+2 fragmentos relevantes
+     ↓
+LLM
+```
+
+Esto conecta directamente con **RAG**.
+
+---
+
+# 10. Context management
+
+Este concepto será fundamental cuando construyas agentes.
+
+Imagina una conversación de 500 mensajes.
+
+Una estrategia ingenua sería enviar siempre:
+
+```text
+mensaje 1
+mensaje 2
+mensaje 3
+...
+mensaje 499
+mensaje 500
+```
+
+al modelo.
+
+Pero quizás el modelo solamente necesita:
+
+```text
+system instructions
+
+información relevante del usuario
+
+resumen de conversación
+
+últimos 10 mensajes
+
+documentos relevantes
+```
+
+Por tanto necesitas decidir:
+
+> **¿Qué información necesita realmente el modelo para tomar esta decisión?**
+
+Eso es context management.
+
+En agentes profesionales es una competencia enorme.
+
+---
+
+# 11. Model selection
+
+Otro error frecuente es utilizar siempre “el modelo más potente”.
+
+Imagina:
+
+```text
+Tarea A:
+clasificar email como spam/no spam
+
+Tarea B:
+analizar un contrato complejo
+
+Tarea C:
+planificar una investigación
+
+Tarea D:
+extraer tres campos de una factura
+```
+
+No necesariamente deberían utilizar el mismo modelo.
+
+Puedes diseñar:
+
+```text
+simple classification
+        ↓
+modelo pequeño/barato
+
+document extraction
+        ↓
+modelo intermedio
+
+complex reasoning
+        ↓
+modelo avanzado
+```
+
+Tu objetivo es optimizar:
+
+```text
+calidad
+latencia
+coste
+fiabilidad
+```
+
+No simplemente:
+
+```text
+"usar el mejor modelo"
+```
+
+---
+
+# 12. Error handling
+
+Esto une varias cosas anteriores.
+
+Supongamos que tienes:
+
+```python
+invoice = extract_invoice(pdf)
+```
+
+¿Qué podría salir mal?
+
+Muchísimas cosas:
+
+```text
+PDF corrupto
+↓
+texto ilegible
+↓
+API timeout
+↓
+rate limit
+↓
+modelo no encuentra importe
+↓
+estructura inválida
+↓
+database caída
+```
+
+Debes pensar explícitamente:
+
+```text
+¿Qué hago si esto falla?
+```
+
+Por ejemplo:
+
+```text
+LLM extraction
+      ↓
+validación
+      ↓
+¿válido?
+ /          \
+sí           no
+↓             ↓
+guardar     retry
+              ↓
+          sigue mal
+              ↓
+       revisión humana
+```
+
+Eso es mucho más cercano al trabajo profesional que simplemente aprender prompts.
+
+---
+
+# El proyecto Document Analyzer
+
+Ahora podemos juntar todo.
+
+Supongamos que quieres construir una aplicación donde una empresa sube facturas PDF.
+
+Una factura contiene:
+
+```text
+INVOICE #19282
+
+Supplier: ACME Ltd
+Date: 10 August 2026
+
+Laptop       £1,200
+Monitor        £400
+
+TOTAL        £1,600
+```
+
+Tu sistema debería hacer:
+
+```text
+             PDF
+              │
+              ▼
+        extracción texto
+              │
+              ▼
+             LLM
+              │
+              ▼
+      Structured Output
+              │
+              ▼
+           Pydantic
+              │
+         validación
+              │
+              ▼
+         PostgreSQL
+              │
+              ▼
+             API
+```
+
+El LLM podría producir:
+
+```json
+{
+    "invoice_number": "19282",
+    "supplier": "ACME Ltd",
+    "date": "2026-08-10",
+    "total": 1600,
+    "currency": "GBP"
+}
+```
+
+Y defines:
+
+```python
+class Invoice(BaseModel):
+    invoice_number: str
+    supplier: str
+    date: date
+    total: float
+    currency: str
+```
+
+Entonces puedes guardar:
+
+```text
+invoice_number | supplier | date       | total | currency
+19282          | ACME Ltd | 2026-08-10 | 1600  | GBP
+```
+
+Y crear endpoints:
+
+```text
+POST /invoices
+GET  /invoices
+GET  /invoices/19282
+```
+
+---
+
+## Lo que realmente quiero que aprendas en esta fase
+
+No memorices doce conceptos aislados. Aprende este flujo:
+
+```text
+                    ┌──────────────┐
+                    │   Usuario    │
+                    └──────┬───────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │   FastAPI    │
+                    └──────┬───────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │   LLM API    │
+                    └──────┬───────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │ Structured   │
+                    │   Output     │
+                    └──────┬───────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │   Pydantic   │
+                    │  Validation  │
+                    └──────┬───────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │ PostgreSQL   │
+                    └──────────────┘
+```
+
+Si puedes construir esto **sin copiar ciegamente un tutorial**, habrás dado un salto importante.
+
+Y observa algo: **todavía no necesitas LangGraph, CrewAI ni sistemas multiagente**. Primero debes ser capaz de convertir un LLM en un componente fiable de una aplicación. Después, tool calling y agent loops resultarán mucho más fáciles de entender.
+
